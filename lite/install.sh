@@ -345,22 +345,19 @@ success "Nginx installed and configured."
 # ============================================================================
 step 5 "Installing MySQL ${MYSQL_VERSION}..."
 
+# Purge previous MySQL if root access is broken from a prior run
+if command -v mysql &>/dev/null && ! mysql -u root -e "SELECT 1" &>/dev/null; then
+    warn "Detected broken MySQL root access. Reinstalling MySQL..."
+    systemctl stop mysql 2>/dev/null || true
+    apt-get purge -y -qq mysql-server mysql-client mysql-common 2>/dev/null || true
+    rm -rf /var/lib/mysql /etc/mysql
+    apt-get autoremove -y -qq 2>/dev/null || true
+fi
+
 apt-get install -y -qq mysql-server mysql-client
 
 systemctl start mysql
 systemctl enable mysql
-
-# If root access is denied (previous run changed auth), reset to auth_socket
-if ! mysql -u root -e "SELECT 1" &>/dev/null; then
-    warn "MySQL root access denied, resetting authentication..."
-    systemctl stop mysql
-    mysqld_safe --skip-grant-tables --skip-networking &>/dev/null &
-    sleep 3
-    mysql -u root -e "FLUSH PRIVILEGES; ALTER USER 'root'@'localhost' IDENTIFIED WITH auth_socket;" 2>/dev/null
-    mysqladmin shutdown 2>/dev/null || kill %1 2>/dev/null || true
-    sleep 2
-    systemctl start mysql
-fi
 
 # Create database + user
 mysql -u root <<MYSQL_SETUP
