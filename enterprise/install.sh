@@ -136,7 +136,6 @@ DB_PASSWORD=$(openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | head -c 24)
 read -rp "$(printf "${BOLD}Database password${NC} [auto-generated]: ")" INPUT_DB_PASS
 INPUT_DB_PASS=${INPUT_DB_PASS:-$DB_PASSWORD}
 
-MYSQL_ROOT_PASSWORD=$(openssl rand -base64 32 | tr -dc 'A-Za-z0-9' | head -c 32)
 
 # App key
 APP_KEY=$(openssl rand -base64 32)
@@ -242,7 +241,7 @@ success "Base packages installed."
 # ============================================================================
 step 2 "Installing PHP ${PHP_VERSION} and extensions..."
 
-add-apt-repository -y ppa:ondrej/php
+add-apt-repository -y -q ppa:ondrej/php
 
 apt-get update -qq
 
@@ -402,9 +401,20 @@ apt-get install -y -qq mysql-server mysql-client
 systemctl start mysql
 systemctl enable mysql
 
-# Secure MySQL & create database + user
+# If root access is denied (previous run changed auth), reset to auth_socket
+if ! mysql -u root -e "SELECT 1" &>/dev/null; then
+    warn "MySQL root access denied, resetting authentication..."
+    systemctl stop mysql
+    mysqld_safe --skip-grant-tables --skip-networking &>/dev/null &
+    sleep 3
+    mysql -u root -e "FLUSH PRIVILEGES; ALTER USER 'root'@'localhost' IDENTIFIED WITH auth_socket;" 2>/dev/null
+    mysqladmin shutdown 2>/dev/null || kill %1 2>/dev/null || true
+    sleep 2
+    systemctl start mysql
+fi
+
+# Create database + user
 mysql -u root <<MYSQL_SETUP
-ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '${MYSQL_ROOT_PASSWORD}';
 CREATE DATABASE IF NOT EXISTS \`${INPUT_DB_NAME}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 CREATE USER IF NOT EXISTS '${INPUT_DB_USER}'@'localhost' IDENTIFIED BY '${INPUT_DB_PASS}';
 GRANT ALL PRIVILEGES ON \`${INPUT_DB_NAME}\`.* TO '${INPUT_DB_USER}'@'localhost';
@@ -718,7 +728,7 @@ echo "  Database Name:      ${INPUT_DB_NAME}"
 echo "  Database User:      ${INPUT_DB_USER}"
 echo "  Database Password:  ${INPUT_DB_PASS}"
 echo ""
-echo "  MySQL Root Password: ${MYSQL_ROOT_PASSWORD}"
+echo "  MySQL Root Access:  sudo mysql"
 echo ""
 echo "  Application files:  ${MIXPOST_DIR}"
 echo "  App .env file:      ${MIXPOST_DIR}/.env"
