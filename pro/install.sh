@@ -3,7 +3,7 @@
 # ============================================================================
 # Mixpost Pro - VPS Installation Script
 # ============================================================================
-# Usage: curl -fsSL https://mixpost.app/install.sh | bash
+# Usage: curl -fsSL https://mixpost.app/install-pro.sh | bash
 #
 # This script installs and configures a fresh VPS with all required software
 # and sets up the Mixpost application ready for use.
@@ -87,6 +87,10 @@ BANNER
 # ---------------------------------------------------------------------------
 info "This installer will set up your server and install Mixpost Pro."
 info "Please provide the required configuration values.\n"
+
+# App name
+read -rp "$(printf "${BOLD}Application name${NC} [Mixpost]: ")" INPUT_APP_NAME
+INPUT_APP_NAME=${INPUT_APP_NAME:-Mixpost}
 
 # Domain / URL
 while true; do
@@ -490,7 +494,7 @@ rm -rf /tmp/mixpost-app
 # Create .env file
 cat > ${MIXPOST_DIR}/.env << ENVFILE
 # Application
-APP_NAME="Mixpost"
+APP_NAME="${INPUT_APP_NAME}"
 APP_KEY=base64:${APP_KEY}
 APP_DEBUG=false
 APP_URL=${APP_URL}

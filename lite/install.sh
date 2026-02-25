@@ -1,0 +1,644 @@
+#!/bin/bash
+
+# ============================================================================
+# Mixpost Lite - VPS Installation Script
+# ============================================================================
+# Usage: curl -fsSL https://mixpost.app/install-lite.sh | bash
+#
+# This script installs and configures a fresh VPS with all required software
+# and sets up the Mixpost application ready for use.
+#
+# Supported OS: Ubuntu 22.04 / 24.04
+# ============================================================================
+
+set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+MIXPOST_DIR="/var/www/html"
+MIXPOST_USER="www-data"
+PHP_VERSION="8.3"
+MYSQL_VERSION="8.0"
+STANDALONE_APP_MAJOR_VERSION=2
+
+# ---------------------------------------------------------------------------
+# Color helpers
+# ---------------------------------------------------------------------------
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+CYAN='\033[0;36m'
+YELLOW='\033[1;33m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+error()   { printf "${RED}Error: %s${NC}\n" "$1"; }
+fatal()   { printf "${RED}Fatal: %s${NC}\n" "$1"; exit 1; }
+info()    { printf "${CYAN}%s${NC}\n" "$1"; }
+success() { printf "${GREEN}%s${NC}\n" "$1"; }
+warn()    { printf "${YELLOW}%s${NC}\n" "$1"; }
+step()    { printf "\n${BOLD}${CYAN}[%s/%s] %s${NC}\n" "$1" "$TOTAL_STEPS" "$2"; }
+
+TOTAL_STEPS=10
+
+# ---------------------------------------------------------------------------
+# Pre-flight checks
+# ---------------------------------------------------------------------------
+if [[ $EUID -ne 0 ]]; then
+    fatal "This script must be run as root. Use: sudo bash or login as root."
+fi
+
+# Detect OS
+if [[ ! -f /etc/os-release ]]; then
+    fatal "Cannot detect OS. This script supports Ubuntu 22.04 / 24.04 only."
+fi
+
+source /etc/os-release
+
+if [[ "$ID" != "ubuntu" ]]; then
+    fatal "This script supports Ubuntu only. Detected: $ID"
+fi
+
+UBUNTU_CODENAME="$VERSION_CODENAME"
+
+if [[ "$UBUNTU_CODENAME" != "jammy" && "$UBUNTU_CODENAME" != "noble" ]]; then
+    warn "This script is tested on Ubuntu 22.04 (jammy) and 24.04 (noble)."
+    warn "Detected: $VERSION_ID ($UBUNTU_CODENAME). Proceeding anyway..."
+fi
+
+# ---------------------------------------------------------------------------
+# Banner
+# ---------------------------------------------------------------------------
+cat << 'BANNER'
+
+    __  ___ _                            __
+  /  |/  /(_)_  __ ____   ____   _____ / /_
+  / /|_/ // /| |/_// __ \ / __ \ / ___// __/
+ / /  / // /_>  < / /_/ // /_/ /(__  )/ /_
+/_/  /_//_//_/|_|/ .___/ \____//____/ \__/
+                /_/
+
+  Mixpost Lite — VPS Installer
+
+BANNER
+
+# ---------------------------------------------------------------------------
+# Gather configuration from user
+# ---------------------------------------------------------------------------
+info "This installer will set up your server and install Mixpost Lite."
+info "Please provide the required configuration values.\n"
+
+# App name
+read -rp "$(printf "${BOLD}Application name${NC} [Mixpost]: ")" INPUT_APP_NAME
+INPUT_APP_NAME=${INPUT_APP_NAME:-Mixpost}
+
+# Domain / URL
+while true; do
+    read -rp "$(printf "${BOLD}Domain name${NC} (e.g. smm.example.com): ")" INPUT_DOMAIN
+    INPUT_DOMAIN=$(echo "$INPUT_DOMAIN" | sed 's|https\?://||;s|/$||')
+    if [[ -n "$INPUT_DOMAIN" ]]; then break; fi
+    error "Domain name is required."
+done
+
+# SSL
+read -rp "$(printf "${BOLD}Enable SSL with Let's Encrypt?${NC} [Y/n]: ")" INPUT_SSL
+INPUT_SSL=${INPUT_SSL:-Y}
+if [[ "$INPUT_SSL" =~ ^[Yy] ]]; then
+    USE_SSL=true
+    APP_URL="https://${INPUT_DOMAIN}"
+    while true; do
+        read -rp "$(printf "${BOLD}Email for Let's Encrypt${NC}: ")" INPUT_SSL_EMAIL
+        if [[ -n "$INPUT_SSL_EMAIL" ]]; then break; fi
+        error "Email is required for Let's Encrypt."
+    done
+else
+    USE_SSL=false
+    APP_URL="http://${INPUT_DOMAIN}"
+fi
+
+# Database credentials
+read -rp "$(printf "${BOLD}Database name${NC} [mixpost_db]: ")" INPUT_DB_NAME
+INPUT_DB_NAME=${INPUT_DB_NAME:-mixpost_db}
+
+read -rp "$(printf "${BOLD}Database username${NC} [mixpost]: ")" INPUT_DB_USER
+INPUT_DB_USER=${INPUT_DB_USER:-mixpost}
+
+DB_PASSWORD=$(openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | head -c 24)
+read -rp "$(printf "${BOLD}Database password${NC} [auto-generated]: ")" INPUT_DB_PASS
+INPUT_DB_PASS=${INPUT_DB_PASS:-$DB_PASSWORD}
+
+MYSQL_ROOT_PASSWORD=$(openssl rand -base64 32 | tr -dc 'A-Za-z0-9' | head -c 32)
+
+# App key
+APP_KEY=$(openssl rand -base64 32)
+
+# SMTP (optional)
+echo ""
+read -rp "$(printf "${BOLD}Configure SMTP mail now?${NC} [y/N]: ")" INPUT_CONFIGURE_SMTP
+if [[ "$INPUT_CONFIGURE_SMTP" =~ ^[Yy] ]]; then
+    read -rp "  SMTP host [smtp.mailgun.org]: " INPUT_MAIL_HOST
+    INPUT_MAIL_HOST=${INPUT_MAIL_HOST:-smtp.mailgun.org}
+    read -rp "  SMTP port [587]: " INPUT_MAIL_PORT
+    INPUT_MAIL_PORT=${INPUT_MAIL_PORT:-587}
+    read -rp "  SMTP username: " INPUT_MAIL_USER
+    read -rsp "  SMTP password: " INPUT_MAIL_PASS
+    echo ""
+    read -rp "  SMTP encryption (tls/ssl/null) [tls]: " INPUT_MAIL_ENCRYPTION
+    INPUT_MAIL_ENCRYPTION=${INPUT_MAIL_ENCRYPTION:-tls}
+    read -rp "  From address [hello@${INPUT_DOMAIN}]: " INPUT_MAIL_FROM
+    INPUT_MAIL_FROM=${INPUT_MAIL_FROM:-hello@${INPUT_DOMAIN}}
+    read -rp "  From name [Mixpost]: " INPUT_MAIL_FROM_NAME
+    INPUT_MAIL_FROM_NAME=${INPUT_MAIL_FROM_NAME:-Mixpost}
+else
+    INPUT_MAIL_HOST="smtp.mailgun.org"
+    INPUT_MAIL_PORT="587"
+    INPUT_MAIL_USER=""
+    INPUT_MAIL_PASS=""
+    INPUT_MAIL_ENCRYPTION="tls"
+    INPUT_MAIL_FROM="hello@example.com"
+    INPUT_MAIL_FROM_NAME="Mixpost"
+fi
+
+# Confirmation
+echo ""
+info "============================================"
+info "  Installation Summary"
+info "============================================"
+echo "  Domain:      ${INPUT_DOMAIN}"
+echo "  URL:         ${APP_URL}"
+echo "  SSL:         ${USE_SSL}"
+echo "  Database:    ${INPUT_DB_NAME}"
+echo "  DB User:     ${INPUT_DB_USER}"
+info "============================================"
+echo ""
+
+read -rp "$(printf "${BOLD}Proceed with installation?${NC} [Y/n]: ")" CONFIRM
+CONFIRM=${CONFIRM:-Y}
+if [[ ! "$CONFIRM" =~ ^[Yy] ]]; then
+    info "Installation cancelled."
+    exit 0
+fi
+
+echo ""
+
+# ============================================================================
+# STEP 1: System Update & Base Packages
+# ============================================================================
+step 1 "Updating system and installing base packages..."
+
+export DEBIAN_FRONTEND=noninteractive
+
+apt-get update -qq
+apt-get upgrade -y -qq
+
+apt-get install -y -qq \
+    software-properties-common \
+    curl \
+    gnupg \
+    ca-certificates \
+    zip \
+    unzip \
+    cron \
+    nano \
+    ufw \
+    wget \
+    lsb-release \
+    apt-transport-https
+
+success "Base packages installed."
+
+# ============================================================================
+# STEP 2: Install PHP 8.3
+# ============================================================================
+step 2 "Installing PHP ${PHP_VERSION} and extensions..."
+
+mkdir -p /etc/apt/keyrings
+
+curl -sS 'https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x14aa40ec0831756756d7f66c4f4ea0aae5267a6c' \
+    | gpg --dearmor \
+    | tee /etc/apt/keyrings/ppa_ondrej_php.gpg > /dev/null
+
+echo "deb [signed-by=/etc/apt/keyrings/ppa_ondrej_php.gpg] https://ppa.launchpadcontent.net/ondrej/php/ubuntu ${UBUNTU_CODENAME} main" \
+    > /etc/apt/sources.list.d/ppa_ondrej_php.list
+
+apt-get update -qq
+
+apt-get install -y -qq \
+    php${PHP_VERSION} \
+    php${PHP_VERSION}-fpm \
+    php${PHP_VERSION}-cli \
+    php${PHP_VERSION}-mysql \
+    php${PHP_VERSION}-gd \
+    php${PHP_VERSION}-curl \
+    php${PHP_VERSION}-bcmath \
+    php${PHP_VERSION}-mbstring \
+    php${PHP_VERSION}-redis \
+    php${PHP_VERSION}-xml \
+    php${PHP_VERSION}-zip \
+    php${PHP_VERSION}-intl
+
+# Configure PHP
+cat > /etc/php/${PHP_VERSION}/fpm/conf.d/99-mixpost.ini << 'PHPINI'
+[PHP]
+memory_limit=512M
+post_max_size=70M
+upload_max_filesize=64M
+max_execution_time=60
+variables_order=EGPCS
+zend.max_allowed_stack_size=-1
+
+[FFI]
+ffi.enable=true
+PHPINI
+
+# Also apply to CLI
+cp /etc/php/${PHP_VERSION}/fpm/conf.d/99-mixpost.ini /etc/php/${PHP_VERSION}/cli/conf.d/99-mixpost.ini
+
+# Ensure PHP-FPM socket directory exists
+mkdir -p /var/run/php
+
+success "PHP ${PHP_VERSION} installed and configured."
+
+# ============================================================================
+# STEP 3: Install Composer
+# ============================================================================
+step 3 "Installing Composer..."
+
+curl -sLS https://getcomposer.org/installer | php -- --install-dir=/usr/bin/ --filename=composer
+
+success "Composer installed."
+
+# ============================================================================
+# STEP 4: Install Nginx
+# ============================================================================
+step 4 "Installing and configuring Nginx..."
+
+apt-get install -y -qq nginx
+
+# Configure Nginx for Mixpost
+cat > /etc/nginx/sites-available/mixpost << NGINXCONF
+server {
+    listen 80;
+    server_name ${INPUT_DOMAIN};
+    server_tokens off;
+    root ${MIXPOST_DIR}/public;
+    index index.php index.html;
+    client_max_body_size 70M;
+
+    add_header X-Frame-Options "SAMEORIGIN";
+    add_header X-XSS-Protection "1; mode=block";
+    add_header X-Content-Type-Options "nosniff";
+
+    location / {
+        try_files \$uri \$uri/ /index.php?\$query_string;
+    }
+
+    location = /robots.txt { access_log off; log_not_found off; }
+
+    access_log off;
+    error_log /var/log/nginx/mixpost-error.log error;
+
+    error_page 404 /index.php;
+
+    location ~ \.php\$ {
+        try_files \$uri =404;
+        fastcgi_split_path_info ^(.+\.php)(/.+)\$;
+        fastcgi_pass unix:/var/run/php/php${PHP_VERSION}-fpm.sock;
+        fastcgi_index index.php;
+        include fastcgi_params;
+        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
+        fastcgi_param PATH_INFO \$fastcgi_path_info;
+        fastcgi_read_timeout 1000;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_buffer_size 128k;
+        proxy_buffers 4 256k;
+        proxy_busy_buffers_size 256k;
+    }
+
+    location ~ /\.(?!well-known).* {
+        deny all;
+    }
+}
+NGINXCONF
+
+# Enable site, disable default
+ln -sf /etc/nginx/sites-available/mixpost /etc/nginx/sites-enabled/mixpost
+rm -f /etc/nginx/sites-enabled/default
+
+# Tune Nginx
+sed -i 's/worker_connections\s*[0-9]*/worker_connections 10000/' /etc/nginx/nginx.conf
+grep -q "worker_rlimit_nofile" /etc/nginx/nginx.conf || \
+    sed -i '/^events/i worker_rlimit_nofile 10000;' /etc/nginx/nginx.conf
+grep -q "multi_accept" /etc/nginx/nginx.conf || \
+    sed -i '/worker_connections/a\        multi_accept on;' /etc/nginx/nginx.conf
+
+nginx -t
+systemctl enable nginx
+
+success "Nginx installed and configured."
+
+# ============================================================================
+# STEP 5: Install MySQL 8.0
+# ============================================================================
+step 5 "Installing MySQL ${MYSQL_VERSION}..."
+
+# Add MySQL APT repository
+curl -fsSL https://repo.mysql.com/RPM-GPG-KEY-mysql-2023 | gpg --dearmor -o /etc/apt/keyrings/mysql.gpg 2>/dev/null || true
+
+echo "deb [signed-by=/etc/apt/keyrings/mysql.gpg] http://repo.mysql.com/apt/ubuntu/ ${UBUNTU_CODENAME} mysql-${MYSQL_VERSION}" \
+    > /etc/apt/sources.list.d/mysql.list 2>/dev/null || true
+
+apt-get update -qq 2>/dev/null || true
+
+# Try MySQL from official repo, fall back to Ubuntu default
+if ! apt-get install -y -qq mysql-server mysql-client 2>/dev/null; then
+    warn "MySQL APT repo not available, installing from default Ubuntu repos..."
+    rm -f /etc/apt/sources.list.d/mysql.list
+    apt-get update -qq
+    apt-get install -y -qq mysql-server mysql-client
+fi
+
+systemctl start mysql
+systemctl enable mysql
+
+# Secure MySQL & create database + user
+mysql -u root <<MYSQL_SETUP
+ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '${MYSQL_ROOT_PASSWORD}';
+CREATE DATABASE IF NOT EXISTS \`${INPUT_DB_NAME}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE USER IF NOT EXISTS '${INPUT_DB_USER}'@'localhost' IDENTIFIED BY '${INPUT_DB_PASS}';
+GRANT ALL PRIVILEGES ON \`${INPUT_DB_NAME}\`.* TO '${INPUT_DB_USER}'@'localhost';
+FLUSH PRIVILEGES;
+MYSQL_SETUP
+
+success "MySQL ${MYSQL_VERSION} installed. Database '${INPUT_DB_NAME}' created."
+
+# ============================================================================
+# STEP 6: Install Redis
+# ============================================================================
+step 6 "Installing Redis..."
+
+apt-get install -y -qq redis-server
+
+# Configure Redis for persistence
+sed -i 's/^# appendonly no/appendonly yes/' /etc/redis/redis.conf
+sed -i 's/^appendonly no/appendonly yes/' /etc/redis/redis.conf
+
+# Bind to localhost only
+sed -i 's/^bind .*/bind 127.0.0.1 ::1/' /etc/redis/redis.conf
+
+systemctl restart redis-server
+systemctl enable redis-server
+
+success "Redis installed and configured."
+
+# ============================================================================
+# STEP 7: Install Media Processing Libraries
+# ============================================================================
+step 7 "Installing FFmpeg..."
+
+apt-get install -y -qq ffmpeg
+
+success "FFmpeg installed."
+
+# ============================================================================
+# STEP 8: Install Mixpost Application
+# ============================================================================
+step 8 "Installing Mixpost Lite application..."
+
+mkdir -p ${MIXPOST_DIR}
+cd ${MIXPOST_DIR}
+
+# Create the Mixpost Lite project
+info "Downloading Mixpost Lite (this may take a few minutes)..."
+
+composer create-project inovector/mixpost-app:^${STANDALONE_APP_MAJOR_VERSION}.0 /tmp/mixpost-app --no-interaction --prefer-dist
+
+# Copy files to web root
+cp -r /tmp/mixpost-app/* ${MIXPOST_DIR}/
+cp /tmp/mixpost-app/.* ${MIXPOST_DIR}/ 2>/dev/null || true
+rm -rf /tmp/mixpost-app
+
+# Create .env file
+cat > ${MIXPOST_DIR}/.env << ENVFILE
+# This value is the name of your application.
+APP_NAME="${INPUT_APP_NAME}"
+
+# Key used to encrypt and decrypt sensitive data.
+APP_KEY=base64:${APP_KEY}
+
+# Debug mode setting. Set to 'false' for production environments.
+APP_DEBUG=false
+
+# Full application URL. Important: it is not allowed to be a slash at the end of the url.
+APP_URL=${APP_URL}
+
+# MySQL connection setup
+DB_HOST=127.0.0.1
+DB_PORT=3306
+DB_DATABASE=${INPUT_DB_NAME}
+DB_USERNAME=${INPUT_DB_USER}
+DB_PASSWORD=${INPUT_DB_PASS}
+
+# Redis connection setup
+REDIS_HOST=127.0.0.1
+REDIS_PASSWORD=null
+REDIS_PORT=6379
+REDIS_PREFIX=mixpost_database_
+
+# Define log channel
+MIXPOST_LOG_CHANNEL=mixpost
+
+# The disk on which to store added files. Disks: "public", "s3". For "s3" you should fill in the AWS_* credentials below.
+MIXPOST_DISK=public
+
+# Define cache prefix.
+MIXPOST_CACHE_PREFIX=mixpost
+
+# SMTP
+MAIL_MAILER=smtp
+MAIL_HOST=${INPUT_MAIL_HOST}
+MAIL_PORT=${INPUT_MAIL_PORT}
+MAIL_USERNAME=${INPUT_MAIL_USER}
+MAIL_PASSWORD=${INPUT_MAIL_PASS}
+MAIL_ENCRYPTION=${INPUT_MAIL_ENCRYPTION}
+MAIL_FROM_ADDRESS="${INPUT_MAIL_FROM}"
+MAIL_FROM_NAME="${INPUT_MAIL_FROM_NAME}"
+
+# AWS Credentials
+AWS_ACCESS_KEY_ID=
+AWS_SECRET_ACCESS_KEY=
+AWS_DEFAULT_REGION=
+AWS_BUCKET=
+
+# Laravel configs
+QUEUE_CONNECTION=redis
+CACHE_PREFIX=mixpost_cache_
+SESSION_COOKIE=mixpost_session
+
+# Additional settings
+HORIZON_PREFIX=mixpost_horizon:
+ENVFILE
+
+# Laravel setup
+php artisan storage:link
+php artisan optimize:clear
+php artisan optimize
+php artisan migrate --force
+php artisan mixpost:clear-settings-cache 2>/dev/null || true
+php artisan mixpost:clear-services-cache 2>/dev/null || true
+
+# Set permissions
+chown -R ${MIXPOST_USER}:${MIXPOST_USER} ${MIXPOST_DIR}
+chmod -R 755 ${MIXPOST_DIR}
+chmod -R 775 ${MIXPOST_DIR}/storage ${MIXPOST_DIR}/bootstrap/cache
+
+success "Mixpost Lite application installed."
+
+# ============================================================================
+# STEP 9: Configure Supervisor, Cron & Services
+# ============================================================================
+step 9 "Configuring Supervisor, cron jobs, and services..."
+
+apt-get install -y -qq supervisor
+
+# Supervisor config for Horizon (queue worker)
+cat > /etc/supervisor/conf.d/mixpost-horizon.conf << 'HORIZONCONF'
+[program:mixpost-horizon]
+process_name=%(program_name)s_%(process_num)02d
+command=php /var/www/html/artisan horizon
+autostart=true
+autorestart=true
+user=www-data
+numprocs=1
+startsecs=1
+redirect_stderr=true
+stdout_logfile=/var/log/supervisor/horizon.log
+stdout_logfile_maxbytes=5MB
+stdout_logfile_backups=3
+stopwaitsecs=5
+stopsignal=SIGTERM
+stopasgroup=true
+killasgroup=true
+HORIZONCONF
+
+# Create log directory
+mkdir -p /var/log/supervisor
+
+# Cron job for Laravel scheduler
+cat > /etc/cron.d/mixpost << 'CRONCONF'
+* * * * * www-data cd /var/www/html && php artisan schedule:run >> /dev/null 2>&1
+CRONCONF
+
+chmod 0644 /etc/cron.d/mixpost
+
+# Restart services
+systemctl restart supervisor
+supervisorctl reread
+supervisorctl update
+systemctl restart php${PHP_VERSION}-fpm
+systemctl restart nginx
+systemctl restart cron
+
+success "Supervisor, cron, and services configured."
+
+# ============================================================================
+# STEP 10: SSL (Let's Encrypt) & Firewall
+# ============================================================================
+step 10 "Configuring firewall and SSL..."
+
+# Configure UFW firewall
+ufw --force reset > /dev/null 2>&1
+ufw default deny incoming > /dev/null 2>&1
+ufw default allow outgoing > /dev/null 2>&1
+ufw allow ssh > /dev/null 2>&1
+ufw allow 80/tcp > /dev/null 2>&1
+ufw allow 443/tcp > /dev/null 2>&1
+ufw --force enable > /dev/null 2>&1
+
+success "Firewall configured (SSH, HTTP, HTTPS)."
+
+if [[ "$USE_SSL" == true ]]; then
+    info "Installing Certbot and obtaining SSL certificate..."
+
+    apt-get install -y -qq certbot python3-certbot-nginx
+
+    certbot --nginx \
+        -d "${INPUT_DOMAIN}" \
+        --non-interactive \
+        --agree-tos \
+        --email "${INPUT_SSL_EMAIL}" \
+        --redirect
+
+    # Enable auto-renewal
+    systemctl enable certbot.timer 2>/dev/null || true
+
+    # Test renewal
+    certbot renew --dry-run 2>/dev/null || warn "Certbot dry-run failed. Check certbot configuration."
+
+    success "SSL certificate obtained and configured."
+fi
+
+# ============================================================================
+# Final Summary
+# ============================================================================
+echo ""
+echo ""
+cat << 'BANNER'
+    __  ___ _                            __
+  /  |/  /(_)_  __ ____   ____   _____ / /_
+  / /|_/ // /| |/_// __ \ / __ \ / ___// __/
+ / /  / // /_>  < / /_/ // /_/ /(__  )/ /_
+/_/  /_//_//_/|_|/ .___/ \____//____/ \__/
+                /_/
+BANNER
+
+echo ""
+success "============================================"
+success "  Mixpost Lite installed successfully!"
+success "============================================"
+echo ""
+echo "  Application URL:    ${APP_URL}"
+echo ""
+echo "  Database Host:      127.0.0.1"
+echo "  Database Name:      ${INPUT_DB_NAME}"
+echo "  Database User:      ${INPUT_DB_USER}"
+echo "  Database Password:  ${INPUT_DB_PASS}"
+echo ""
+echo "  MySQL Root Password: ${MYSQL_ROOT_PASSWORD}"
+echo ""
+echo "  Application files:  ${MIXPOST_DIR}"
+echo "  App .env file:      ${MIXPOST_DIR}/.env"
+echo ""
+info "  Services running:"
+echo "    - Nginx          (web server)"
+echo "    - PHP-FPM ${PHP_VERSION}   (PHP processor)"
+echo "    - MySQL ${MYSQL_VERSION}      (database)"
+echo "    - Redis          (cache & queue)"
+echo "    - Horizon        (queue worker via Supervisor)"
+echo "    - Cron           (Laravel scheduler)"
+echo ""
+if [[ "$USE_SSL" == true ]]; then
+    success "  SSL: Enabled (auto-renewal configured)"
+else
+    warn "  SSL: Not configured. Run the following to enable:"
+    echo "    apt install certbot python3-certbot-nginx"
+    echo "    certbot --nginx -d ${INPUT_DOMAIN}"
+fi
+echo ""
+warn "  IMPORTANT: Save the credentials above in a safe place!"
+echo ""
+info "  Next steps:"
+echo "    1. Visit ${APP_URL} to create your admin account"
+echo "    2. Configure your social media accounts in the dashboard"
+echo "    3. Configure SMTP settings in .env if not done during setup"
+echo ""
+info "  Useful commands:"
+echo "    supervisorctl status                 - Check Horizon status"
+echo "    systemctl status nginx               - Check Nginx status"
+echo "    systemctl status mysql               - Check MySQL status"
+echo "    systemctl status redis-server        - Check Redis status"
+echo "    tail -f /var/log/nginx/mixpost-error.log  - View Nginx errors"
+echo "    tail -f ${MIXPOST_DIR}/storage/logs/*.log - View app logs"
+echo ""
+success "------- Installation Complete! -------"
+echo ""
