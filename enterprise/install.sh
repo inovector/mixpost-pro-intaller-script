@@ -234,7 +234,10 @@ success "Base packages installed."
 # ============================================================================
 step 2 "Installing PHP ${PHP_VERSION} and extensions..."
 
-add-apt-repository -y ppa:ondrej/php
+mkdir -p /etc/apt/keyrings
+curl -sSLo /etc/apt/keyrings/deb.sury.org-php.gpg https://packages.sury.org/php/apt.gpg
+echo "deb [signed-by=/etc/apt/keyrings/deb.sury.org-php.gpg] https://packages.sury.org/php/ ${UBUNTU_CODENAME} main" \
+    > /etc/apt/sources.list.d/php-sury.list
 
 apt-get update -qq
 
@@ -389,21 +392,7 @@ success "Nginx installed and configured."
 # ============================================================================
 step 5 "Installing MySQL ${MYSQL_VERSION}..."
 
-# Add MySQL APT repository
-curl -fsSL https://repo.mysql.com/RPM-GPG-KEY-mysql-2023 | gpg --dearmor -o /etc/apt/keyrings/mysql.gpg 2>/dev/null || true
-
-echo "deb [signed-by=/etc/apt/keyrings/mysql.gpg] http://repo.mysql.com/apt/ubuntu/ ${UBUNTU_CODENAME} mysql-${MYSQL_VERSION}" \
-    > /etc/apt/sources.list.d/mysql.list 2>/dev/null || true
-
-apt-get update -qq 2>/dev/null || true
-
-# Try MySQL from official repo, fall back to Ubuntu default
-if ! apt-get install -y -qq mysql-server mysql-client 2>/dev/null; then
-    warn "MySQL APT repo not available, installing from default Ubuntu repos..."
-    rm -f /etc/apt/sources.list.d/mysql.list
-    apt-get update -qq
-    apt-get install -y -qq mysql-server mysql-client
-fi
+apt-get install -y -qq mysql-server mysql-client
 
 systemctl start mysql
 systemctl enable mysql
