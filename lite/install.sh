@@ -86,7 +86,7 @@ BANNER
 # Gather configuration from user
 # ---------------------------------------------------------------------------
 info "This installer will set up your server and install Mixpost Lite."
-info "Please provide the required configuration values.\n"
+info "Please provide the required configuration values."
 
 # App name
 read -rp "$(printf "${BOLD}Application name${NC} [Mixpost]: ")" INPUT_APP_NAME
@@ -171,6 +171,8 @@ echo "  Database:    ${INPUT_DB_NAME}"
 echo "  DB User:     ${INPUT_DB_USER}"
 info "============================================"
 echo ""
+info "Installation typically takes 5-15 minutes depending on your server."
+echo ""
 
 read -rp "$(printf "${BOLD}Proceed with installation?${NC} [Y/n]: ")" CONFIRM
 CONFIRM=${CONFIRM:-Y}
@@ -212,14 +214,7 @@ success "Base packages installed."
 # ============================================================================
 step 2 "Installing PHP ${PHP_VERSION} and extensions..."
 
-mkdir -p /etc/apt/keyrings
-
-curl -sS 'https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x14aa40ec0831756756d7f66c4f4ea0aae5267a6c' \
-    | gpg --dearmor \
-    | tee /etc/apt/keyrings/ppa_ondrej_php.gpg > /dev/null
-
-echo "deb [signed-by=/etc/apt/keyrings/ppa_ondrej_php.gpg] https://ppa.launchpadcontent.net/ondrej/php/ubuntu ${UBUNTU_CODENAME} main" \
-    > /etc/apt/sources.list.d/ppa_ondrej_php.list
+add-apt-repository -y ppa:ondrej/php
 
 apt-get update -qq
 
@@ -409,9 +404,11 @@ mkdir -p ${MIXPOST_DIR}
 cd ${MIXPOST_DIR}
 
 # Create the Mixpost Lite project
+export COMPOSER_ALLOW_SUPERUSER=1
+
 info "Downloading Mixpost Lite (this may take a few minutes)..."
 
-composer create-project inovector/mixpost-app:^${STANDALONE_APP_MAJOR_VERSION}.0 /tmp/mixpost-app --no-interaction --prefer-dist
+composer create-project inovector/MixpostApp:^${STANDALONE_APP_MAJOR_VERSION}.0 /tmp/mixpost-app --no-interaction --prefer-dist
 
 # Copy files to web root
 cp -r /tmp/mixpost-app/* ${MIXPOST_DIR}/
