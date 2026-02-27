@@ -359,9 +359,21 @@ apt-get install -y -qq mysql-server mysql-client
 systemctl start mysql
 systemctl enable mysql
 
+# Check if database already exists
+if mysql -u root -e "USE \`${INPUT_DB_NAME}\`" &>/dev/null; then
+    warn "Database '${INPUT_DB_NAME}' already exists and will be dropped."
+    read -rp "$(printf "${BOLD}Continue and drop the existing database?${NC} [Y/n]: ")" DROP_CONFIRM
+    DROP_CONFIRM=${DROP_CONFIRM:-Y}
+    if [[ ! "$DROP_CONFIRM" =~ ^[Yy] ]]; then
+        info "Installation cancelled."
+        exit 0
+    fi
+    mysql -u root -e "DROP DATABASE \`${INPUT_DB_NAME}\`"
+fi
+
 # Create database + user
 mysql -u root <<MYSQL_SETUP
-CREATE DATABASE IF NOT EXISTS \`${INPUT_DB_NAME}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE DATABASE \`${INPUT_DB_NAME}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 CREATE USER IF NOT EXISTS '${INPUT_DB_USER}'@'localhost' IDENTIFIED BY '${INPUT_DB_PASS}';
 ALTER USER '${INPUT_DB_USER}'@'localhost' IDENTIFIED BY '${INPUT_DB_PASS}';
 GRANT ALL PRIVILEGES ON \`${INPUT_DB_NAME}\`.* TO '${INPUT_DB_USER}'@'localhost';
