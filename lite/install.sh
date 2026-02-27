@@ -488,6 +488,9 @@ php artisan migrate --force
 php artisan mixpost:clear-settings-cache 2>/dev/null || true
 php artisan mixpost:clear-services-cache 2>/dev/null || true
 
+# Create default admin user (admin@example.com / changeme)
+php artisan mixpost-auth:create --admin
+
 # Set permissions
 chown -R ${MIXPOST_USER}:${MIXPOST_USER} ${MIXPOST_DIR}
 chmod -R 755 ${MIXPOST_DIR}
@@ -627,10 +630,14 @@ fi
 echo ""
 warn "  IMPORTANT: Save the credentials above in a safe place!"
 echo ""
+echo "  Admin Email:    admin@example.com"
+echo "  Admin Password: changeme"
+echo ""
 info "  Next steps:"
-echo "    1. Visit ${APP_URL} to create your admin account"
-echo "    2. Configure your social media accounts in the dashboard"
-echo "    3. Configure SMTP settings in .env if not done during setup"
+echo "    1. Visit ${APP_URL} and log in with the admin credentials above"
+echo "    2. Change the default admin password immediately"
+echo "    3. Configure your social media accounts in the dashboard"
+echo "    4. Configure SMTP settings in .env if not done during setup"
 echo ""
 info "  Useful commands:"
 echo "    supervisorctl status                 - Check Horizon status"
